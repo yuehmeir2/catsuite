@@ -1,0 +1,185 @@
+---
+title: "CAT Demo Suite Simulation Report"
+output: html_document
+params:
+  history: NULL
+  result_cut_theta: NULL
+---
+
+
+```{r a1, echo=FALSE}
+
+knitr::opts_chunk$set(echo = F, message = F, cache = F, warning = F)
+options(knitr.duplicate.label = 'allow')
+
+THETA_LOWER = -4
+THETA_UPPER = 4
+history = params$history
+result_cut_theta = params$result_cut_theta
+
+```
+
+
+## Simulation Results
+
+```{r a2}
+
+getResult_history_table_v2 = function () {
+
+  if (verbose) cat("### ", format(Sys.time(), "%X"), " call getResult_history_table() \n")
+
+  dt0 <- map(history, ~{
+    bind_cols(label = .x$label, getMeasurementResult(.x$result, result_cut_theta))
+  }) %>% bind_rows()
+
+  dt <- datatable(dt0, options = list(dom = 't'), rownames= FALSE, width = "1200") %>%
+    formatRound(names(dt0)[-1], digits = DIGITS)
+
+  return(dt)
+
+}
+
+```
+
+\newline
+\newline
+\newline
+
+## True vs. Estimated Theta
+
+```{r a3}
+nSim = length(history)
+# h = if (nSim > 10) 12 else if (nSim > 8) 10 else if (nSim > 6) 6 else if (nSim > 4) 4 else 2
+h = ceiling(nSim/2) * 3
+w = if (nSim > 1) 12 else 6
+```
+
+
+```{r a4,fig.height=h, fig.width=w}
+
+getResult_scatter_plot_v2 = function(resultList, result_cut_theta) {
+
+  if (length(resultList) < 1) return()
+
+  p <- map(resultList, ~{
+    simuleeIds = unique(.x$result$output$SIM_ID)
+    simuleeLastRows = vapply(simuleeIds, function(simuleeId) {
+      max(which(.x$result$output$SIM_ID == simuleeId))
+    }, as.integer(0), USE.NAMES = FALSE)
+    simuleeTrueThetas = .x$result$output$TRUE_THETA[simuleeLastRows]
+    simuleeFinalThetas = .x$result$output$THETA[simuleeLastRows]
+
+  data = data.frame(ID = simuleeIds, TRUE_THETA = simuleeTrueThetas, 
+                    ESTIMATE = simuleeFinalThetas)
+  cut_theta = unique(result_cut_theta)
+
+  CATShinyModules::correlationPlot (
+      plotData = data, xVar = "ESTIMATE", yVar = "TRUE_THETA", useDiffAsColor = F, cutsAt = cut_theta,
+      xRange = c(THETA_LOWER, THETA_UPPER), addTitle = F, plotName = .x$label)
+
+  })
+
+  if (length(p) == 1) return(p[[1]])
+
+  p %>% subplot(nrows = ceiling(length(p)/2), shareY = T, shareX = T)
+
+}
+
+getResult_scatter_plot_v2(resultList = history, result_cut_theta = result_cut_theta)
+
+```
+
+\newline
+\newline
+\newline
+
+## CSEM
+
+```{r a5, fig.height=h, fig.width=w}
+
+genCSEM_scatter_plot_v2 = function (resultList = history) {
+
+  if (length(resultList) < 1) return()
+
+  p <- map(resultList, ~{
+
+    plotData <- .x$result$output %>%
+      group_by(SIM_ID) %>% slice(n()) %>% ungroup() %>% select(THETA, CSEM)
+
+    plotData %>%
+      plot_ly(type = "scatter", mode = "markers", x = ~THETA, y = ~CSEM, colors = "Blues", 
+              opacity = .4, name = .x$label) %>%
+      layout(xaxis = list(title = "Estimated Theta", range = c(THETA_LOWER, THETA_UPPER), zeroline = FALSE),
+             yaxis = list(title = "CSEM", range = c(0, max(plotData$CSEM + 0.2)), zeroline = FALSE))
+  })
+
+  if (length(p) == 1) return(p[[1]])
+
+  p %>% subplot(nrows = ceiling(length(p)/2), shareY = T, shareX = T)
+
+}
+
+genCSEM_scatter_plot_v2() 
+
+```
+
+
+## Adaptivity
+
+```{r a6,fig.height=h, fig.width=w}
+
+genAdaptivity_plot_v2 = function (resultList = history, startThetaList = map(history, ~.x$control$startTheta)) {
+
+  if (length(resultList) < 1) return()
+
+  data <- map2(resultList, startThetaList, ~{
+      label = .x$label
+      data0 = .x$result$output
+      startTheta = .y
+
+      data2 = data0 %>% select(SIM_ID, PAR_2, THETA) %>%
+        group_by(SIM_ID) %>% group_modify(~{
+          temp = .x
+          if (is.na(temp$THETA[1])) temp$THETA[1] = startTheta
+          temp <- temp %>% fill(THETA) %>% mutate(SEQ = 1:nrow(.))
+          temp <- temp %>% mutate(DIFF = c(startTheta, temp$THETA[1:(nrow(.)-1)]) - temp$PAR_2)
+        }) %>% ungroup()
+
+      n = length(unique(data2$SEQ))
+      data2 %>% group_by(SEQ) %>% group_map(~{
+        tibble(Simulation = label,
+               Item = .y$SEQ,
+               Mean = mean(.x$DIFF, na.rm = T),
+               Abs_Mean = mean(abs(.x$DIFF), na.rm = T),
+               Min = min(.x$DIFF, na.rm = T),
+               Max = max(.x$DIFF, na.rm = T),
+               Who = .x$SIM_ID[which(.x$DIFF == min(.x$DIFF, na.rm = T))[1]])
+      }) %>% bind_rows() %>% pivot_longer(cols = c("Abs_Mean", "Mean", "Min", "Max"))
+    }) %>% bind_rows()
+
+  ticks = seq(min(data$Item), max(data$Item))
+  y_range = c(floor(min(data$Min)), ceiling(max(data$Max)))
+
+  data %>% mutate_at("name", as.factor) %>%
+      group_by(Simulation) %>%
+      group_map(~{
+        p <- plot_ly(data = .x, x = ~Item, y = ~value, color = ~name, #colors = "Paired",
+                linetype = ~name,
+                type = "scatter", mode = "lines", showlegend = (.y == data$Simulation[1] ),
+                legendgroup = ~Simulation)
+
+        if (length(resultList) > 1) x_title = .x$Simulation[1] else x_title = "Item Sequence"
+        xaxis = list(range = c(10, 0))
+        p %>%  layout(title = "Adaptivity = Item Selection Theta - Selected Item Difficulty",
+                      xaxis = list(title = x_title, tickvals = ticks),
+                      yaxis = list(title = "Theta - Item Difficulty", range = y_range))
+      }, .keep = T) %>% subplot(nrows = ceiling(length(startThetaList)/2),
+                                shareY = T, shareX = F, titleX = T, margin = 0.07) %>%
+                        layout(legend = list(itemdoubleclick = F, itemclick = F))
+
+
+}
+genAdaptivity_plot_v2 () 
+
+```
+
